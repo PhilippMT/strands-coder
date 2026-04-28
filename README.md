@@ -28,6 +28,7 @@
     ◆ <a href="https://aws.amazon.com/bedrock/">AWS Bedrock</a>
     ◆ <a href="https://cloud.langfuse.com">Langfuse</a>
     ◆ <a href="https://github.com/strands-agents/sdk-python">Strands SDK</a>
+    ◆ <a href="docs/gitlab.md">GitLab Adaptation</a>
     ◆ <a href="https://dev.strands.my">Dashboard</a>
   </p>
 </div>
