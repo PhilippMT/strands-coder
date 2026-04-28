@@ -34,15 +34,11 @@ def setup_otel() -> None:
         secret_key = os.environ.get("LANGFUSE_SECRET_KEY", "")
 
         if public_key and secret_key:
-            auth_token = base64.b64encode(
-                f"{public_key}:{secret_key}".encode()
-            ).decode()
+            auth_token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
             otel_endpoint = f"{langfuse_host}/api/public/otel"
 
             os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = otel_endpoint
-            os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = (
-                f"Authorization=Basic {auth_token}"
-            )
+            os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = f"Authorization=Basic {auth_token}"
             print(f"✓ Langfuse OTEL: {langfuse_host}")
 
     # Generic OTEL configuration
@@ -122,9 +118,7 @@ def load_mcp_servers() -> list:
 
                 # Get disabled tools list and convert to tool_filters format
                 disabled_tools = cfg.get("disabledTools", [])
-                tool_filters = (
-                    ToolFilters(rejected=disabled_tools) if disabled_tools else None
-                )
+                tool_filters = ToolFilters(rejected=disabled_tools) if disabled_tools else None
 
                 if "command" in cfg:
                     command = cfg["command"]
@@ -132,9 +126,7 @@ def load_mcp_servers() -> list:
                     env = cfg.get("env")
 
                     def transport(_cmd: str = command, _args: list = args, _env: dict | None = env):  # type: ignore[no-untyped-def]
-                        return stdio_client(
-                            StdioServerParameters(command=_cmd, args=_args, env=_env)
-                        )
+                        return stdio_client(StdioServerParameters(command=_cmd, args=_args, env=_env))
 
                     client = MCPClient(
                         transport_callable=transport,
@@ -146,11 +138,7 @@ def load_mcp_servers() -> list:
                     headers = cfg.get("headers")
 
                     def transport_http(_url: str = url, _headers: dict | None = headers):  # type: ignore[no-untyped-def]
-                        return (
-                            sse_client(_url)
-                            if "/sse" in _url
-                            else streamablehttp_client(url=_url, headers=_headers)
-                        )
+                        return sse_client(_url) if "/sse" in _url else streamablehttp_client(url=_url, headers=_headers)
 
                     client = MCPClient(
                         transport_callable=transport_http,
@@ -163,9 +151,7 @@ def load_mcp_servers() -> list:
                 clients.append(client)
 
                 if disabled_tools:
-                    print(
-                        f"✓ MCP server '{name}' (disabled: {', '.join(disabled_tools)})"
-                    )
+                    print(f"✓ MCP server '{name}' (disabled: {', '.join(disabled_tools)})")
                 else:
                     print(f"✓ MCP server '{name}'")
             except Exception as e:
@@ -179,44 +165,65 @@ def load_mcp_servers() -> list:
 
 def extract_issue_id() -> str | None:
     """
-    Extract issue ID from GitHub context.
+    Extract issue ID from GitHub or GitLab context.
 
-    Returns the issue number if the event is triggered by an issue or issue comment.
+    Returns the issue/MR number if the event is triggered by a tracked issue, MR, PR, or comment.
     This is used to link traces to issues in Langfuse for observability.
     """
     github_context_json = os.environ.get("GITHUB_CONTEXT", "{}")
-    if not github_context_json or github_context_json == "{}":
-        return None
+    if github_context_json and github_context_json != "{}":
+        try:
+            github_context = json.loads(github_context_json)
+        except json.JSONDecodeError:
+            github_context = {}
 
-    try:
-        github_context = json.loads(github_context_json)
-    except json.JSONDecodeError:
-        return None
+        event_name = github_context.get("event_name", "")
+        event = github_context.get("event", {})
 
-    event_name = github_context.get("event_name", "")
-    event = github_context.get("event", {})
+        # Issue events
+        if event_name in ["issues", "issue_comment"]:
+            issue = event.get("issue", {})
+            if issue:
+                return str(issue.get("number"))
 
-    # Issue events
-    if event_name in ["issues", "issue_comment"]:
-        issue = event.get("issue", {})
-        if issue:
-            return str(issue.get("number"))
+        # PR events (can also be linked)
+        elif event_name in [
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+        ]:
+            pr = event.get("pull_request", {})
+            if pr:
+                return f"pr-{pr.get('number')}"
 
-    # PR events (can also be linked)
-    elif event_name in [
-        "pull_request",
-        "pull_request_review",
-        "pull_request_review_comment",
-    ]:
-        pr = event.get("pull_request", {})
-        if pr:
-            return f"pr-{pr.get('number')}"
+        # Discussion events
+        elif event_name in ["discussion", "discussion_comment"]:
+            discussion = event.get("discussion", {})
+            if discussion:
+                return f"disc-{discussion.get('number')}"
 
-    # Discussion events
-    elif event_name in ["discussion", "discussion_comment"]:
-        discussion = event.get("discussion", {})
-        if discussion:
-            return f"disc-{discussion.get('number')}"
+    gitlab_payload_json = (
+        os.environ.get("GITLAB_CONTEXT")
+        or os.environ.get("GITLAB_EVENT_PAYLOAD")
+        or os.environ.get("STRANDS_EVENT_PAYLOAD")
+    )
+    if gitlab_payload_json:
+        try:
+            gitlab_payload = json.loads(gitlab_payload_json)
+        except json.JSONDecodeError:
+            gitlab_payload = {}
+
+        attrs = gitlab_payload.get("object_attributes", {})
+        if isinstance(attrs, dict) and attrs.get("iid"):
+            prefix = "mr" if gitlab_payload.get("object_kind") in {"merge_request", "note"} else "issue"
+            return f"gitlab-{prefix}-{attrs.get('iid')}"
+
+        merge_request = gitlab_payload.get("merge_request", {})
+        if isinstance(merge_request, dict) and merge_request.get("iid"):
+            return f"gitlab-mr-{merge_request.get('iid')}"
+
+    if os.environ.get("CI_MERGE_REQUEST_IID"):
+        return f"gitlab-mr-{os.environ['CI_MERGE_REQUEST_IID']}"
 
     return None
 
@@ -229,7 +236,10 @@ def run_agent(prompt: str) -> None:
         setup_otel()
 
         # Tool loading with defaults (minimal core tools)
-        default_tools = "strands_tools:shell,retrieve,use_agent;strands_coder:use_github,system_prompt,store_in_kb,create_subagent,projects,scheduler"
+        default_tools = (
+            "strands_tools:shell,retrieve,use_agent;"
+            "strands_coder:use_github,system_prompt,store_in_kb,create_subagent,projects,scheduler"
+        )
         tools_config = os.getenv("STRANDS_TOOLS", default_tools)
 
         print(f"Loading tools: {tools_config}")
@@ -244,10 +254,12 @@ def run_agent(prompt: str) -> None:
 
         # Model and session
         model = create_model(provider=os.getenv("STRANDS_PROVIDER", "bedrock"))
-        session_id = (
-            os.getenv("SESSION_ID")
-            or f"gh-{os.getenv('GITHUB_REPOSITORY', 'unknown').replace('/', '-')}-{os.getenv('GITHUB_RUN_ID', 'local')}"
-        )
+        repository = os.getenv("GITHUB_REPOSITORY") or os.getenv("CI_PROJECT_PATH", "unknown")
+        run_id = os.getenv("GITHUB_RUN_ID") or os.getenv("CI_PIPELINE_ID", "local")
+        workflow = os.getenv("GITHUB_WORKFLOW") or os.getenv("CI_PIPELINE_SOURCE", "unknown")
+        actor = os.getenv("GITHUB_ACTOR") or os.getenv("GITLAB_USER_LOGIN", "unknown")
+        session_prefix = "gh" if os.getenv("GITHUB_REPOSITORY") else "gl"
+        session_id = os.getenv("SESSION_ID") or f"{session_prefix}-{repository.replace('/', '-')}-{run_id}"
 
         session_manager = None
         s3_bucket = os.getenv("S3_SESSION_BUCKET")
@@ -263,7 +275,8 @@ def run_agent(prompt: str) -> None:
         issue_id = extract_issue_id()
 
         # Build trace attributes with issue_id for linking traces to GitHub issues
-        trace_tags = ["Strands-Agents", "GitHub-Action"]
+        trace_tags = ["Strands-Agents"]
+        trace_tags.append("GitHub-Action" if os.getenv("GITHUB_REPOSITORY") else "GitLab-CI")
         if issue_id:
             trace_tags.append(f"issue:{issue_id}")
             print(f"✓ Trace linked to issue: {issue_id}")
@@ -273,16 +286,13 @@ def run_agent(prompt: str) -> None:
             system_prompt=build_system_prompt(),
             tools=tools,
             session_manager=session_manager,
-            load_tools_from_directory=os.getenv(
-                "STRANDS_TOOLS_DIRECTORY", "false"
-            ).lower()
-            == "true",
+            load_tools_from_directory=os.getenv("STRANDS_TOOLS_DIRECTORY", "false").lower() == "true",
             trace_attributes={
                 "session.id": session_id,
-                "user.id": os.getenv("GITHUB_ACTOR", "unknown"),
-                "repository": os.getenv("GITHUB_REPOSITORY", "unknown"),
-                "workflow": os.getenv("GITHUB_WORKFLOW", "unknown"),
-                "run_id": os.getenv("GITHUB_RUN_ID", "unknown"),
+                "user.id": actor,
+                "repository": repository,
+                "workflow": workflow,
+                "run_id": run_id,
                 "issue_id": issue_id,  # CRUCIAL: Links all traces to the triggering issue
                 "tags": trace_tags,
             },
@@ -330,9 +340,7 @@ def run_agent(prompt: str) -> None:
                         f.write(f"**Issue ID:** `{issue_id}` (traces linked)\n")
                     if kb_id:
                         f.write(f"**Knowledge Base:** `{kb_id}`\n")
-                    f.write(
-                        f"**System Prompt:** \n<details>\n{agent.system_prompt}\n</details>"
-                    )
+                    f.write(f"**System Prompt:** \n<details>\n{agent.system_prompt}\n</details>")
             except Exception as e:
                 print(f"Failed to write summary: {e}")
 
@@ -363,11 +371,7 @@ def run_agent(prompt: str) -> None:
 
         # Use os._exit() when MCP servers present (background threads need force-kill)
         # Unless PYTEST_CURRENT_TEST is set (testing mode), use sys.exit() for proper cleanup
-        if (
-            "has_mcp_servers" in locals()
-            and has_mcp_servers
-            and not os.getenv("PYTEST_CURRENT_TEST")
-        ):
+        if "has_mcp_servers" in locals() and has_mcp_servers and not os.getenv("PYTEST_CURRENT_TEST"):
             os._exit(1)
         else:
             sys.exit(1)
@@ -423,9 +427,7 @@ For more info: https://github.com/strands-agents/strands-action
             if args.prompt:
                 prompt = " ".join(args.prompt)
             else:
-                parser.error(
-                    "Prompt required via STRANDS_PROMPT env var or command-line argument"
-                )
+                parser.error("Prompt required via STRANDS_PROMPT env var or command-line argument")
 
         if not prompt.strip():
             parser.error("Prompt cannot be empty")

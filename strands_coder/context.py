@@ -14,6 +14,60 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
+
+
+def _load_json_from_env(*names: str) -> dict[str, Any]:
+    """Return the first JSON object found in the given environment variables."""
+    for name in names:
+        value = os.environ.get(name, "")
+        if not value:
+            continue
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            print(f"⚠ Failed to parse {name}")
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _gitlab_api_headers() -> dict[str, str]:
+    """Build GitLab API headers from a PAT/project token or CI job token."""
+    private_token = os.environ.get("GITLAB_TOKEN", os.environ.get("PRIVATE_TOKEN", ""))
+    job_token = os.environ.get("CI_JOB_TOKEN", "")
+    headers = {"Content-Type": "application/json"}
+    if private_token:
+        headers["PRIVATE-TOKEN"] = private_token
+    elif job_token:
+        headers["JOB-TOKEN"] = job_token
+    return headers
+
+
+def _gitlab_api_base() -> str:
+    """Resolve the GitLab API v4 base URL for self-hosted and SaaS instances."""
+    api_url = os.environ.get("CI_API_V4_URL")
+    if api_url:
+        return api_url.rstrip("/")
+    server_url = os.environ.get("CI_SERVER_URL", "https://gitlab.com").rstrip("/")
+    return f"{server_url}/api/v4"
+
+
+def _gitlab_project_ref(payload: dict[str, Any]) -> str:
+    """Return the GitLab project id/path encoded for REST API routes."""
+    project_id = os.environ.get("CI_PROJECT_ID")
+    if project_id:
+        return project_id
+
+    project = payload.get("project", {})
+    if isinstance(project, dict):
+        candidate = project.get("id") or project.get("path_with_namespace")
+        if candidate:
+            return quote(str(candidate), safe="")
+
+    project_path = os.environ.get("CI_PROJECT_PATH")
+    return quote(project_path, safe="") if project_path else ""
 
 
 def get_own_source_code() -> str:
@@ -116,10 +170,10 @@ def fetch_github_event_context() -> str:
 
 **Event Type:** `{event_name}`
 **Repository:** `{repo_name}`
-**Action:** `{event.get('action', 'N/A')}`
-**Actor:** `{github_context.get('actor', 'N/A')}`
-**Workflow:** `{github_context.get('workflow', 'N/A')}`
-**Run ID:** `{github_context.get('run_id', 'N/A')}`
+**Action:** `{event.get("action", "N/A")}`
+**Actor:** `{github_context.get("actor", "N/A")}`
+**Workflow:** `{github_context.get("workflow", "N/A")}`
+**Run ID:** `{github_context.get("run_id", "N/A")}`
 
 <details>
 <summary>Full GitHub Context (Click to expand)</summary>
@@ -157,7 +211,7 @@ def fetch_github_event_context() -> str:
 
 ### Original Issue Body
 ```markdown
-{issue_body or '(empty)'}
+{issue_body or "(empty)"}
 ```
 """)
 
@@ -225,9 +279,7 @@ def fetch_github_event_context() -> str:
                 total_comments = issue_data.get("comments", {}).get("totalCount", 0)
 
                 if comments:
-                    context_parts.append(
-                        f"\n### 💬 Comments ({total_comments} total)\n"
-                    )
+                    context_parts.append(f"\n### 💬 Comments ({total_comments} total)\n")
                     for idx, comment in enumerate(comments, 1):
                         author = comment.get("author", {}).get("login", "unknown")
                         body = comment.get("body", "")
@@ -250,14 +302,10 @@ def fetch_github_event_context() -> str:
                         state = source.get("state")
                         url = source.get("url")
                         if num and title:
-                            linked_items.append(
-                                f"  - #{num}: {title} ({state}) - {url}"
-                            )
+                            linked_items.append(f"  - #{num}: {title} ({state}) - {url}")
 
                 if linked_items:
-                    context_parts.append(
-                        f"\n### 🔗 Linked Items\n" + "\n".join(linked_items)
-                    )
+                    context_parts.append("\n### 🔗 Linked Items\n" + "\n".join(linked_items))
 
         # Pull Request events
         elif event_name in [
@@ -291,7 +339,7 @@ def fetch_github_event_context() -> str:
 
 ### Original PR Body
 ```markdown
-{pr_body or '(empty)'}
+{pr_body or "(empty)"}
 ```
 """)
 
@@ -366,9 +414,7 @@ def fetch_github_event_context() -> str:
             if "errors" in data:
                 print(f"⚠ GraphQL errors: {data['errors']}")
             else:
-                pr_data = (
-                    data.get("data", {}).get("repository", {}).get("pullRequest", {})
-                )
+                pr_data = data.get("data", {}).get("repository", {}).get("pullRequest", {})
 
                 # Reviews
                 reviews = pr_data.get("reviews", {}).get("nodes", [])
@@ -384,7 +430,7 @@ def fetch_github_event_context() -> str:
                         context_parts.append(f"""
 **Review #{idx}** by @{author} - {state} at {created}:
 ```markdown
-{body or '(no comment)'}
+{body or "(no comment)"}
 ```
 """)
 
@@ -393,9 +439,7 @@ def fetch_github_event_context() -> str:
                 total_comments = pr_data.get("comments", {}).get("totalCount", 0)
 
                 if comments:
-                    context_parts.append(
-                        f"\n### 💬 Comments ({total_comments} total)\n"
-                    )
+                    context_parts.append(f"\n### 💬 Comments ({total_comments} total)\n")
                     for idx, comment in enumerate(comments, 1):
                         author = comment.get("author", {}).get("login", "unknown")
                         body = comment.get("body", "")
@@ -412,18 +456,14 @@ def fetch_github_event_context() -> str:
                 total_threads = pr_data.get("reviewThreads", {}).get("totalCount", 0)
 
                 if threads:
-                    context_parts.append(
-                        f"\n### 🧵 Code Review Threads ({total_threads} total)\n"
-                    )
+                    context_parts.append(f"\n### 🧵 Code Review Threads ({total_threads} total)\n")
                     for idx, thread in enumerate(threads, 1):
                         is_resolved = thread.get("isResolved", False)
                         thread_comments = thread.get("comments", {}).get("nodes", [])
 
                         if thread_comments:
                             first_comment = thread_comments[0]
-                            author = first_comment.get("author", {}).get(
-                                "login", "unknown"
-                            )
+                            author = first_comment.get("author", {}).get("login", "unknown")
                             body = first_comment.get("body", "")
                             path = first_comment.get("path", "")
                             line = first_comment.get("line")
@@ -439,28 +479,20 @@ def fetch_github_event_context() -> str:
                             # Follow-up comments in thread
                             if len(thread_comments) > 1:
                                 for reply in thread_comments[1:]:
-                                    reply_author = reply.get("author", {}).get(
-                                        "login", "unknown"
-                                    )
+                                    reply_author = reply.get("author", {}).get("login", "unknown")
                                     reply_body = reply.get("body", "")
-                                    context_parts.append(
-                                        f"  ↳ @{reply_author}: {reply_body}\n"
-                                    )
+                                    context_parts.append(f"  ↳ @{reply_author}: {reply_body}\n")
 
                 # Linked issues (Fixes #N)
-                closing_issues = pr_data.get("closingIssuesReferences", {}).get(
-                    "nodes", []
-                )
+                closing_issues = pr_data.get("closingIssuesReferences", {}).get("nodes", [])
                 if closing_issues:
-                    context_parts.append(f"\n### 🎫 Linked Issues\n")
+                    context_parts.append("\n### 🎫 Linked Issues\n")
                     for issue in closing_issues:
                         num = issue.get("number")
                         title = issue.get("title")
                         state = issue.get("state")
                         url = issue.get("url")
-                        context_parts.append(
-                            f"  - Fixes #{num}: {title} ({state}) - {url}\n"
-                        )
+                        context_parts.append(f"  - Fixes #{num}: {title} ({state}) - {url}\n")
 
         # Discussion events
         elif event_name in ["discussion", "discussion_comment"]:
@@ -485,7 +517,7 @@ def fetch_github_event_context() -> str:
 
 ### Original Post
 ```markdown
-{disc_body or '(empty)'}
+{disc_body or "(empty)"}
 ```
 """)
 
@@ -525,9 +557,7 @@ def fetch_github_event_context() -> str:
             if "errors" in data:
                 print(f"⚠ GraphQL errors: {data['errors']}")
             else:
-                disc_data = (
-                    data.get("data", {}).get("repository", {}).get("discussion", {})
-                )
+                disc_data = data.get("data", {}).get("repository", {}).get("discussion", {})
                 comments = disc_data.get("comments", {}).get("nodes", [])
                 total_comments = disc_data.get("comments", {}).get("totalCount", 0)
 
@@ -557,6 +587,172 @@ def fetch_github_event_context() -> str:
 
         traceback.print_exc()
         return ""
+
+
+def fetch_gitlab_event_context() -> str:
+    """
+    Fetch GitLab CI/webhook context for self-hosted GitLab integrations.
+
+    Supports:
+    - Native GitLab CI variables for merge request pipelines.
+    - Webhook payloads passed as GITLAB_CONTEXT, GITLAB_EVENT_PAYLOAD, or STRANDS_EVENT_PAYLOAD.
+    - Merge request note/comment events, including optional note history enrichment.
+    - External trigger payloads such as Jira webhooks forwarded through GitLab pipeline variables.
+    """
+    payload = _load_json_from_env("GITLAB_CONTEXT", "GITLAB_EVENT_PAYLOAD", "STRANDS_EVENT_PAYLOAD")
+    has_gitlab_env = bool(os.environ.get("GITLAB_CI") or os.environ.get("CI_SERVER_URL"))
+    if not payload and not has_gitlab_env:
+        return ""
+
+    object_kind = str(
+        payload.get("object_kind") or payload.get("event_type") or os.environ.get("CI_PIPELINE_SOURCE", "")
+    )
+    project = payload.get("project", {}) if isinstance(payload.get("project"), dict) else {}
+    attrs = payload.get("object_attributes", {}) if isinstance(payload.get("object_attributes"), dict) else {}
+    user = payload.get("user", {}) if isinstance(payload.get("user"), dict) else {}
+    project_path = project.get("path_with_namespace") or os.environ.get("CI_PROJECT_PATH", "")
+    project_url = project.get("web_url") or os.environ.get("CI_PROJECT_URL", "")
+    action = attrs.get("action") or attrs.get("state") or os.environ.get("CI_MERGE_REQUEST_EVENT_TYPE", "")
+
+    context_parts = [
+        f"""
+## 🦊 GITLAB CONTEXT
+
+**Event Type:** `{object_kind or "gitlab_ci"}`
+**Project:** `{project_path}`
+**Action:** `{action or "N/A"}`
+**Actor:** `{user.get("username") or os.environ.get("GITLAB_USER_LOGIN", "N/A")}`
+**Pipeline Source:** `{os.environ.get("CI_PIPELINE_SOURCE", "N/A")}`
+**Pipeline ID:** `{os.environ.get("CI_PIPELINE_ID", "N/A")}`
+**Project URL:** {project_url or "N/A"}
+
+<details>
+<summary>Full GitLab Payload/CI Context (Click to expand)</summary>
+
+```json
+{json.dumps(payload, indent=2) if payload else json.dumps(_gitlab_ci_snapshot(), indent=2)}
+```
+
+</details>
+"""
+    ]
+
+    merge_request = payload.get("merge_request", {}) if isinstance(payload.get("merge_request"), dict) else {}
+    if not merge_request and attrs.get("target_project_id"):
+        merge_request = attrs
+
+    mr_iid = merge_request.get("iid") or attrs.get("iid") or os.environ.get("CI_MERGE_REQUEST_IID")
+    if mr_iid:
+        mr_title = merge_request.get("title") or attrs.get("title") or os.environ.get("CI_MERGE_REQUEST_TITLE", "")
+        mr_url = merge_request.get("url") or attrs.get("url") or os.environ.get("CI_MERGE_REQUEST_PROJECT_URL", "")
+        source_branch = merge_request.get("source_branch") or os.environ.get("CI_MERGE_REQUEST_SOURCE_BRANCH_NAME", "")
+        target_branch = merge_request.get("target_branch") or os.environ.get("CI_MERGE_REQUEST_TARGET_BRANCH_NAME", "")
+        description = merge_request.get("description") or attrs.get("description", "")
+        context_parts.append(f"""
+## 🔀 GITLAB MERGE REQUEST CONTEXT
+
+**MR:** !{mr_iid}: {mr_title}
+**Branches:** {source_branch} → {target_branch}
+**URL:** {mr_url or "N/A"}
+
+### Merge Request Description
+```markdown
+{description or "(empty)"}
+```
+""")
+
+    note = payload.get("object_attributes", {}) if object_kind == "note" else {}
+    if note:
+        context_parts.append(f"""
+## 💬 GITLAB COMMENT CONTEXT
+
+**Note ID:** `{note.get("id", "N/A")}`
+**Noteable Type:** `{note.get("noteable_type", "N/A")}`
+**URL:** {note.get("url", "N/A")}
+
+```markdown
+{note.get("note", "(empty)")}
+```
+""")
+
+    notes_context = _fetch_gitlab_mr_notes(payload, str(mr_iid)) if mr_iid else ""
+    if notes_context:
+        context_parts.append(notes_context)
+
+    if payload and not mr_iid and object_kind not in {"merge_request", "note"}:
+        context_parts.append("""
+## 🌐 EXTERNAL TRIGGER CONTEXT
+
+This run was started from an external payload. Treat the payload above as the user request source.
+""")
+
+    print(f"✓ GitLab event context loaded ({object_kind or 'gitlab_ci'})")
+    return f"\n---\n{''.join(context_parts)}\n---\n"
+
+
+def _gitlab_ci_snapshot() -> dict[str, str]:
+    """Return the GitLab CI variables useful for agent context without secrets."""
+    keys = [
+        "CI_SERVER_URL",
+        "CI_API_V4_URL",
+        "CI_PROJECT_ID",
+        "CI_PROJECT_PATH",
+        "CI_PROJECT_URL",
+        "CI_PIPELINE_ID",
+        "CI_PIPELINE_SOURCE",
+        "CI_COMMIT_SHA",
+        "CI_COMMIT_BRANCH",
+        "CI_MERGE_REQUEST_IID",
+        "CI_MERGE_REQUEST_TITLE",
+        "CI_MERGE_REQUEST_SOURCE_BRANCH_NAME",
+        "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+        "GITLAB_USER_LOGIN",
+    ]
+    return {key: os.environ[key] for key in keys if os.environ.get(key)}
+
+
+def _fetch_gitlab_mr_notes(payload: dict[str, Any], mr_iid: str) -> str:
+    """Fetch merge request note history when GitLab API credentials are available."""
+    import requests
+
+    headers = _gitlab_api_headers()
+    if "PRIVATE-TOKEN" not in headers and "JOB-TOKEN" not in headers:
+        return ""
+
+    project_ref = _gitlab_project_ref(payload)
+    if not project_ref:
+        return ""
+
+    try:
+        response = requests.get(
+            f"{_gitlab_api_base()}/projects/{project_ref}/merge_requests/{mr_iid}/notes",
+            headers=headers,
+            params={"order_by": "created_at", "sort": "asc", "per_page": 100},
+            timeout=15,
+        )
+        response.raise_for_status()
+        notes = response.json()
+    except Exception as e:
+        print(f"⚠ GitLab MR notes fetch failed: {e}")
+        return ""
+
+    if not isinstance(notes, list) or not notes:
+        return ""
+
+    rendered = ["\n### 💬 Merge Request Notes\n"]
+    for idx, note in enumerate(notes, 1):
+        if not isinstance(note, dict):
+            continue
+        author = note.get("author", {}).get("username", "unknown")
+        body = note.get("body", "")
+        created = note.get("created_at", "")
+        rendered.append(f"""
+**Note #{idx}** by @{author} at {created}:
+```markdown
+{body}
+```
+""")
+    return "".join(rendered)
 
 
 def fetch_project_context(project_id: str) -> str:
@@ -676,36 +872,33 @@ def fetch_project_context(project_id: str) -> str:
 
             # Format item
             if item_type == "DRAFT_ISSUE":
-                item_list.append(
-                    f"  - 📝 Draft: {content.get('title')} [{status}] (ID: {item.get('id')})"
-                )
+                item_list.append(f"  - 📝 Draft: {content.get('title')} [{status}] (ID: {item.get('id')})")
             else:
                 repo = content.get("repository", {}).get("nameWithOwner", "")
                 num = content.get("number", "?")
                 title = content.get("title", "")
                 state = content.get("state", "")
-                item_list.append(
-                    f"  - #{num}: {title} [{status}] ({repo}, {state}) (ID: {item.get('id')})"
-                )
+                item_list.append(f"  - #{num}: {title} [{status}] ({repo}, {state}) (ID: {item.get('id')})")
 
         context = f"""
 ---
 ## 📊 PROJECT CONTEXT (Pre-loaded)
 
-**Project:** {project.get('title')} (#{project.get('number')})
-**ID:** `{project.get('id')}`
-**URL:** {project.get('url')}
+**Project:** {project.get("title")} (#{project.get("number")})
+**ID:** `{project.get("id")}`
+**URL:** {project.get("url")}
 
 ### Status Summary
-- Todo: {status_counts.get('Todo', 0)}
-- In Progress: {status_counts.get('In Progress', 0)}
-- Done: {status_counts.get('Done', 0)}
+- Todo: {status_counts.get("Todo", 0)}
+- In Progress: {status_counts.get("In Progress", 0)}
+- Done: {status_counts.get("Done", 0)}
 - **Total:** {total}
 
 ### Current Items ({len(item_list)} shown)
-{chr(10).join(item_list) if item_list else '  No items yet'}
+{chr(10).join(item_list) if item_list else "  No items yet"}
 
-**Note:** Use `projects(action="update_item", item_id="PVTI_...", field_name="Status", field_value="In Progress")` to update status.
+**Note:** Use `projects(action="update_item", item_id="PVTI_...", field_name="Status",
+field_value="In Progress")` to update status.
 ---
 """
         print(f"✓ Project context loaded: {project.get('title')} ({total} items)")
@@ -728,14 +921,15 @@ def extract_user_message() -> str:
 
     Returns the user's message for semantic matching (e.g., for retrieve tool).
     """
+    gitlab_message = extract_gitlab_user_message()
     github_context_json = os.environ.get("GITHUB_CONTEXT", "{}")
     if not github_context_json or github_context_json == "{}":
-        return ""
+        return gitlab_message
 
     try:
         github_context = json.loads(github_context_json)
     except json.JSONDecodeError:
-        return ""
+        return gitlab_message
 
     event_name = github_context.get("event_name", "")
     event = github_context.get("event", {})
@@ -779,7 +973,48 @@ def extract_user_message() -> str:
         comment = event.get("comment", {})
         return comment.get("body", "")
 
-    # Default: return empty (workflow_dispatch, labels, etc.)
+    # Default: return GitLab/external payload message if present.
+    return gitlab_message
+
+
+def extract_gitlab_user_message() -> str:
+    """
+    Extract the user message from GitLab webhook/CI payloads.
+
+    Handles merge request comments, merge request descriptions, issue payloads, and generic external payloads
+    forwarded through STRANDS_EVENT_PAYLOAD.
+    """
+    payload = _load_json_from_env("GITLAB_CONTEXT", "GITLAB_EVENT_PAYLOAD", "STRANDS_EVENT_PAYLOAD")
+    if not payload:
+        return ""
+
+    attrs = payload.get("object_attributes", {}) if isinstance(payload.get("object_attributes"), dict) else {}
+    object_kind = str(payload.get("object_kind") or payload.get("event_type") or "")
+
+    if object_kind == "note":
+        return str(attrs.get("note", ""))
+
+    if object_kind in {"merge_request", "issue"}:
+        return str(attrs.get("description") or attrs.get("title") or "")
+
+    for key in ("comment", "message", "body", "text", "summary", "description"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+
+    issue = payload.get("issue")
+    if isinstance(issue, dict):
+        for key in ("fields", "body", "description", "summary"):
+            value = issue.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        fields = issue.get("fields")
+        if isinstance(fields, dict):
+            for key in ("summary", "description"):
+                value = fields.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+
     return ""
 
 
@@ -856,9 +1091,7 @@ def build_system_prompt() -> str:
     # Base system prompt
     base_prompt = os.getenv("SYSTEM_PROMPT", "")
     if not base_prompt:
-        base_prompt = (
-            "You are an autonomous GitHub agent powered by Strands Agents SDK."
-        )
+        base_prompt = "You are an autonomous GitHub agent powered by Strands Agents SDK."
 
     # Add input system prompt if provided
     input_system_prompt = os.getenv("INPUT_SYSTEM_PROMPT", "")
@@ -874,6 +1107,11 @@ def build_system_prompt() -> str:
     github_event_context = fetch_github_event_context()
     if github_event_context:
         base_prompt = f"{base_prompt}\n\n{github_event_context}"
+
+    # Add GitLab CI/webhook context for self-hosted GitLab and external triggers.
+    gitlab_event_context = fetch_gitlab_event_context()
+    if gitlab_event_context:
+        base_prompt = f"{base_prompt}\n\n{gitlab_event_context}"
 
     # Add Project context if configured
     project_id = os.getenv("STRANDS_CODER_PROJECT_ID")
